@@ -4,11 +4,14 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
 	"strings"
 	"time"
+
+	"github.com/lain-the-coder/pokedexcli/internal/pokecache"
 )
 
 const baseURL = "https://pokeapi.co/api/v2/location-area"
@@ -23,6 +26,7 @@ type config struct {
 	Next     string
 	Previous string
 	Client   *http.Client
+	cache    *pokecache.Cache
 }
 
 type locationAreaResponse struct {
@@ -74,26 +78,39 @@ func commandMapb(cfg *config) error {
 }
 
 func doRequest(cfg *config, currentURL string) error {
-	u, err := url.Parse(currentURL)
-	if err != nil {
-		return err
-	}
-	req, err := http.NewRequest("GET", u.String(), nil)
-	if err != nil {
-		return err
-	}
-	res, err := cfg.Client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer res.Body.Close()
-	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		return fmt.Errorf("unexpected status from GET %s: %d %s", currentURL, res.StatusCode, res.Status)
-	}
 	var result locationAreaResponse
-	err = json.NewDecoder(res.Body).Decode(&result)
-	if err != nil {
-		return err
+	savedData, exists := cfg.cache.Get(currentURL)
+	if exists {
+		err := json.Unmarshal(savedData, &result)
+		if err != nil {
+			return err
+		}
+	} else {
+		u, err := url.Parse(currentURL)
+		if err != nil {
+			return err
+		}
+		req, err := http.NewRequest("GET", u.String(), nil)
+		if err != nil {
+			return err
+		}
+		res, err := cfg.Client.Do(req)
+		if err != nil {
+			return err
+		}
+		defer res.Body.Close()
+		if res.StatusCode < 200 || res.StatusCode >= 300 {
+			return fmt.Errorf("unexpected status from GET %s: %d %s", currentURL, res.StatusCode, res.Status)
+		}
+		bodyBytes, err := io.ReadAll(res.Body)
+		if err != nil {
+			return err
+		}
+		err = json.Unmarshal(bodyBytes, &result)
+		if err != nil {
+			return err
+		}
+		cfg.cache.Add(currentURL, bodyBytes)
 	}
 	for _, r := range result.Results {
 		fmt.Println(r.Name)
@@ -158,10 +175,12 @@ func getCommands() map[string]cliCommand {
 
 func main() {
 	client := &http.Client{Timeout: 10 * time.Second}
+	cache := pokecache.NewCache(5 * time.Second)
 	cfg := config{
 		Next:     "",
 		Previous: "",
 		Client:   client,
+		cache:    cache,
 	}
 	scanner := bufio.NewScanner(os.Stdin)
 
